@@ -1,0 +1,143 @@
+version: '3.8'
+
+services:
+  # MariaDB Database
+  mariadb:
+    image: mariadb:10.9
+    container_name: voucherpay_mariadb
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root_password}
+      MYSQL_DATABASE: ${DB_NAME:-voucherpay_enterprise}
+      MYSQL_USER: ${DB_USER:-voucherpay_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-user_password}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./docker/mariadb/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - voucherpay_network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # Redis for caching and sessions
+  redis:
+    image: redis:7-alpine
+    container_name: voucherpay_redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_password}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - voucherpay_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      timeout: 20s
+      retries: 5
+
+  # FastAPI Backend
+  fastapi-backend:
+    build:
+      context: ./backend/fastapi
+      dockerfile: Dockerfile
+    container_name: voucherpay_fastapi
+    environment:
+      - DB_HOST=mariadb
+      - DB_PORT=3306
+      - DB_NAME=${DB_NAME:-voucherpay_enterprise}
+      - DB_USER=${DB_USER:-voucherpay_user}
+      - DB_PASSWORD=${DB_PASSWORD:-user_password}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis_password}
+    ports:
+      - "8000:8000"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/fastapi:/app
+      - uploads_data:/app/uploads
+    networks:
+      - voucherpay_network
+    restart: unless-stopped
+
+  # Node.js Backend
+  nodejs-backend:
+    build:
+      context: ./backend/nodejs
+      dockerfile: Dockerfile
+    container_name: voucherpay_nodejs
+    environment:
+      - DB_HOST=mariadb
+      - DB_PORT=3306
+      - DB_NAME=${DB_NAME:-voucherpay_enterprise}
+      - DB_USER=${DB_USER:-voucherpay_user}
+      - DB_PASSWORD=${DB_PASSWORD:-user_password}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis_password}
+    ports:
+      - "3000:3000"
+      - "4000:4000"  # GraphQL endpoint
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/nodejs:/app
+      - uploads_data:/app/uploads
+    networks:
+      - voucherpay_network
+    restart: unless-stopped
+
+  # Angular Frontend
+  angular-frontend:
+    build:
+      context: ./frontend/angular
+      dockerfile: Dockerfile
+    container_name: voucherpay_angular
+    ports:
+      - "4200:4200"
+    depends_on:
+      - fastapi-backend
+      - nodejs-backend
+    volumes:
+      - ./frontend/angular:/app
+      - /app/node_modules
+    networks:
+      - voucherpay_network
+    restart: unless-stopped
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: voucherpay_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./docker/nginx/ssl:/etc/nginx/ssl
+    depends_on:
+      - fastapi-backend
+      - nodejs-backend
+      - angular-frontend
+    networks:
+      - voucherpay_network
+    restart: unless-stopped
+
+volumes:
+  mariadb_data:
+  redis_data:
+  uploads_data:
+
+networks:
+  voucherpay_network:
+    driver: bridge
